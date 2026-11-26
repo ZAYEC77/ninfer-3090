@@ -1,5 +1,8 @@
 # NInfer-3090
 
+> **ZAYEC77 fork:** native Codex app/peer context compatibility and a reproducible Linux
+> production build. See [deployment and branch policy](deploy/README.md).
+
 [![Release](https://img.shields.io/github/v/release/ashalliants/ninfer-3090?label=release&color=2a78d6)](https://github.com/ashalliants/ninfer-3090/releases/latest)
 [![License](https://img.shields.io/github/license/ashalliants/ninfer-3090?color=2a78d6)](LICENSE)
 [![Host checks](https://github.com/ashalliants/ninfer-3090/actions/workflows/host-checks.yml/badge.svg)](https://github.com/ashalliants/ninfer-3090/actions/workflows/host-checks.yml)
