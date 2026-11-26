@@ -92,3 +92,30 @@ The fork supports the observed native Codex conversational protocol, not every h
 service. Hosted tools, Files/Conversations, audio and another provider's private reasoning
 ciphertexts are outside this contract. NInfer's versioned reasoning token is an encoding,
 not encryption or a signature. No quality or speed improvement is claimed by this patch.
+
+## Full qualification before an upstream upgrade
+
+Build the optional `qualification` target at a recorded source revision. It builds all standalone
+CTest executables as well as the bundle, and uses Python 3.11 with pinned CPU PyTorch, NumPy,
+Jinja2, pytest, safetensors and jsonschema for conversion and schema-oracle tests. This adds nothing to the runtime image.
+
+```sh
+revision=$(git rev-parse HEAD)
+docker build -f deploy/Dockerfile --target qualification \
+  --build-arg SOURCE_REVISION="$revision" -t ninfer-qualification .
+docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=none \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+  -v "$PWD/.git:/src/.git:ro" \
+  -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
+  ninfer-qualification ctest -L cpu --parallel 4 --output-on-failure
+docker run --rm -w /src ninfer-qualification /usr/local/bin/python3.11 -m pytest -q \
+  tests/artifact tests/convert tests/flash_next tests/bench/ttft tests/test_serve_corpus.py
+```
+
+The read-only Git metadata is needed by the hermetic Vast launcher test (`git show HEAD:...`);
+only the known `/src` checkout is marked safe for the container's different UID. Do not mount
+operator settings or credentials. GPU-labelled tests require exclusive access to the card:
+finish user requests, stop NInfer through its supervisor, mount the existing models read-only,
+set `NINFER_TEST_ARTIFACT` to the explicit Qwen artifact and run `ctest -L gpu --parallel 1`.
+Always restore the previous service after qualification, including on test failure. Record skips
+for absent model/graft/S3 prerequisites separately from passed tests.

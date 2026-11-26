@@ -344,7 +344,8 @@ int run() {
     // skipped rather than failed.
     try {
         run_overlay(artifact, 8192, "free KV pages fund the window");
-        run_overlay(artifact, 1024, "the weight tail funds the window");
+        // The processor reserves 1024 tokens for text; a 1024-token context drops the image.
+        run_overlay(artifact, 2048, "the weight tail funds the window");
     } catch (const std::invalid_argument& error) {
         std::cout << "overlay Vision rows skipped: " << error.what() << '\n';
     }

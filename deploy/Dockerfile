@@ -42,3 +42,23 @@ WORKDIR /workspace
 EXPOSE 8080
 STOPSIGNAL SIGTERM
 CMD ["ninfer-serve", "--help"]
+
+# Optional full qualification environment. CPU-only PyTorch supplies conversion-test oracles;
+# CUDA numerical tests use the engine's own CUDA 12.8 libraries and independent C++ oracles.
+FROM python:3.11.14-slim-bookworm AS test-python
+FROM build AS qualification
+COPY --from=test-python /usr/local /usr/local
+RUN ldconfig && apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+RUN /usr/local/bin/python3.11 -m pip install --no-cache-dir \
+      --index-url https://download.pytorch.org/whl/cpu torch==2.5.1+cpu \
+    && /usr/local/bin/python3.11 -m pip install --no-cache-dir \
+      pytest==8.3.5 numpy==2.1.2 jinja2==3.1.6 safetensors==0.6.2 jsonschema==4.23.0
+RUN --mount=type=cache,id=ninfer-codex-ccache,target=/root/.cache/ccache \
+    cmake -S /src -B /build -DPython3_EXECUTABLE=/usr/local/bin/python3.11 \
+    && cmake --build /build --parallel ${BUILD_JOBS}
+ARG SOURCE_REVISION
+LABEL org.opencontainers.image.source="https://github.com/ZAYEC77/ninfer-3090" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
+WORKDIR /build
+CMD ["ctest", "--output-on-failure"]
