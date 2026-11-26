@@ -1888,7 +1888,7 @@ wire response contains typed `output` Items.
 | `top_logprobs` | omitted or `0` |
 | `service_tier` | omitted, `auto`, or `default`; the response reports `default` |
 | `background` | omitted or `false` |
-| `include` | omitted or an empty array |
+| `include` | `reasoning.encrypted_content` returns a versioned plain encoding of raw reasoning for stateless replay; other values are rejected. This field is not encryption or a signature |
 | `stream_options.include_obfuscation` | optional boolean; accepted as a transport hint, but this local server emits no padding |
 | cache and client hints | `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_retention`, and explicit breakpoints follow [OpenAI prompt caching](#openai-prompt-caching); `safety_identifier` and `user` are accepted as client hints |
 
@@ -1907,11 +1907,28 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `refusal` | assistant-message replay part; its text enters assistant history |
 | `input_image` | user- or assistant-message part with HTTP(S) or data-URI `image_url`; detail omitted or `auto`; requires server `--vision` |
 | `input_video` | NInfer extension with HTTP(S) or data-URI `video_url`; requires server `--vision` |
-| `reasoning` | raw replay Item with `reasoning_text` content (`content` itself may be omitted); summary/encrypted metadata may accompany raw text but cannot replace it |
+| `reasoning` | raw reasoning text, or this server's `encrypted_content` encoding; foreign opaque tokens cannot replace raw text |
 | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments` |
-| `function_call_output` | completed result with required `call_id` and optional matching name/namespace assertion; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
+| `function_call_output` | completed result with `call_id`, or named external app/agent context without it; text/image output retains its original source |
 | `custom_tool_call` | completed assistant call of a [custom tool](#custom-tools) with optional `id` and namespace, plus required `call_id`, `name`, and string `input` |
 | `custom_tool_call_output` | as `function_call_output`, for a custom tool's call |
+
+**Codex app and inter-chat context.** A `function_call_output` without `call_id` (also null or an
+empty string) is accepted when it carries a non-empty `name`, with an optional `namespace`.
+These unsolicited context records have no preceding assistant call. This covers selected-page
+metadata and multipart snapshots, inter-chat messages, and other named context sources without a
+tool-name allowlist. String and structured text/image output use the normal content validators.
+`internal_chat_message_metadata_passthrough`, when present, must be an object or null and is
+preserved with the original Item ID, source name/namespace, content, and canonical input order.
+
+The model receives this as user-context data preceded by explicit source attribution. It is not
+an assistant's executed tool result, and its namespace never becomes a system/developer role or a
+grant of permissions. If context arrives between an assistant call and its real results, those
+results are validated and grouped first; the context follows in arrival order. Canonical input
+Items retain their original order for storage and replay. Ordinary user messages do not receive
+this reordering. Unnamed results without call IDs, invalid call ID types, mismatched real tool
+results, and custom results without call IDs remain errors. The same behavior is used by create,
+input-token counting, stored continuation, and full-history stateless replay.
 
 Contiguous assistant-owned Items form one assistant history turn in the representable order
 `reasoning` -> assistant message content -> `function_call`/`custom_tool_call`. Multiple message
@@ -2145,7 +2162,7 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 ```
 
 Unsupported Create fields include Conversations, prompt templates, context management,
-`access_programs`, hosted moderation, non-empty `include`, background execution, compaction,
+`access_programs`, hosted moderation, unsupported `include` values, background execution, compaction,
 files/audio, and OpenAI-hosted/MCP tools. These are compatibility boundaries, not silently
 accepted placeholders.
 

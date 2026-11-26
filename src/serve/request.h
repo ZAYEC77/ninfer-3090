@@ -120,6 +120,8 @@ struct ChatTurn {
     // verified against ToolCall::custom of the call identified by tool_call_id. Unset when the
     // protocol has no such distinction.
     std::optional<bool> tool_result_custom;
+    // Unsolicited app/agent context is not a result of an assistant tool call.
+    bool external_context = false;
     bool tool_result_is_error = false;
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
