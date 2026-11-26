@@ -85,6 +85,8 @@ def deploy(tag, revision):
     assert len(re.findall(r'^NINFER_IMAGE=.*$', old_env, re.M)) == 1, 'Expected one NINFER_IMAGE in .env'
     details = json.loads(run('docker', 'image', 'inspect', tag, capture=True))[0]
     assert details['Config']['Labels']['org.opencontainers.image.revision'] == revision
+    runtime_version = details['Config']['Labels']['org.opencontainers.image.version']
+    assert runtime_version, 'The runtime image must declare its source version'
     current = image()
     previous = current['Image']
     was_running = current['State']['Running']
@@ -111,7 +113,8 @@ def deploy(tag, revision):
         print('Previous image restored; no backup files created', file=sys.stderr, flush=True)
         raise
     report = {'source_repo': 'https://github.com/ZAYEC77/ninfer-3090', 'source_commit': revision,
-              'image_id': details['Id'], 'image_tag': tag, 'previous_image_id': previous,
+              'image_id': details['Id'], 'image_tag': tag, 'runtime_version': runtime_version,
+              'previous_image_id': previous,
               'deployed_at': datetime.now(timezone.utc).isoformat(), 'protocol_suites': 4,
               'native_scenarios': 10, 'codex_checks': checks}
     (VERIFY/'deployment.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -141,7 +144,9 @@ def rebuild():
     print(tests, flush=True)
     assert '0 tests failed out of 4' in tests, 'The four expected protocol suites did not run'
     (VERIFY/'protocol-tests.json').write_text(json.dumps({'source_commit': revision, 'tests': 4, 'passed': True}) + '\n')
-    run(*args, '--target', 'runtime', '--build-arg', 'SOURCE_REVISION=' + revision, '-t', tag, '.')
+    version = (ROOT/'VERSION').read_text().strip()
+    run(*args, '--target', 'runtime', '--build-arg', 'SOURCE_REVISION=' + revision,
+        '--build-arg', 'SOURCE_VERSION=' + version, '-t', tag, '.')
     # Catch edits made while Docker was compiling; do not label a mixed checkout as this revision.
     final = run('git', 'rev-parse', 'HEAD', capture=True)
     current_diff = run('git', 'diff', 'HEAD', capture=True)

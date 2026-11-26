@@ -5,12 +5,12 @@ assistant `call_id`, preserved source identity and app metadata, valid tool-resu
 and native opaque reasoning replay. External context remains user data and never acquires
 system/developer authority. The public contract is in [serving.md](../docs/serving.md).
 
-## Branches
+## Production source
 
-- `master`: upstream development plus this fork's context patch and deployment tools.
-- `release/codex-v0.18.0`: the qualified production baseline `v0.18.0-rtx3090` plus the
-  context patch and reasoning-replay backport. Production uses this branch at an exact commit;
-  unrelated newer model/kernel changes are not part of its build.
+`master` integrates upstream `v0.20.0-rtx3090`, including the subsequent NVFP4 wide-prefill
+fix, with this fork's native context patch and deployment tools. Each deployment records its
+exact source commit and image ID. Upstream upgrades require the full qualification below;
+`ninferctl update` follows this fork's `origin/master` and never merges upstream automatically.
 
 No credentials, private server configuration, user conversations, weights or binaries belong
 in Git. Existing model files are reused. Heretic conversion and automatic model switching
@@ -18,7 +18,7 @@ are separate tasks; this deployment still serves the ordinary Qwen3.8-27B.
 
 ## Operate the server from one checkout
 
-The server checkout is `/data/projects/ninfer` itself, tracking `release/codex-v0.18.0`.
+The server checkout is `/data/projects/ninfer` itself, tracking `master`.
 `origin` is this fork; operator settings live in ignored `.env`, and current deployment/test
 records in ignored `.local/`. Neither is sent to Docker's build context. `models/` is a link
 to the existing shared model directory; model files are not copied or removed.
@@ -53,14 +53,15 @@ deployment, pass the resolved NVIDIA image digests via `CUDA_DEVEL_IMAGE` and
 `CUDA_RUNTIME_IMAGE` and record the resulting image ID.
 
 ```sh
-git clone --branch release/codex-v0.18.0 https://github.com/ZAYEC77/ninfer-3090.git
-cd ninfer-3090
+git clone --branch master https://github.com/ZAYEC77/ninfer-3090.git ninfer
+cd ninfer
 revision=$(git rev-parse HEAD)
 docker build -f deploy/Dockerfile --target protocol-tests -t ninfer-protocol-tests .
 docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=none \
   -e NVIDIA_DRIVER_CAPABILITIES=compute,utility ninfer-protocol-tests
 docker build -f deploy/Dockerfile --target runtime \
-  --build-arg SOURCE_REVISION="$revision" -t "ninfer-local:$revision" .
+  --build-arg SOURCE_REVISION="$revision" \
+  --build-arg SOURCE_VERSION="$(cat VERSION)" -t "ninfer-local:$revision" .
 ```
 
 The four protocol suites cover OpenAI schema, Responses, Responses store and Anthropic schema.
@@ -97,7 +98,8 @@ not encryption or a signature. No quality or speed improvement is claimed by thi
 
 Build the optional `qualification` target at a recorded source revision. It builds all standalone
 CTest executables as well as the bundle, and uses Python 3.11 with pinned CPU PyTorch, NumPy,
-Jinja2, pytest, safetensors and jsonschema for conversion and schema-oracle tests. This adds nothing to the runtime image.
+Jinja2, pytest, safetensors and jsonschema for conversion and schema-oracle tests. The build tree
+is inside the Docker checkout at `/src/build-linux`. These dependencies add nothing to the runtime image.
 
 ```sh
 revision=$(git rev-parse HEAD)
@@ -109,13 +111,36 @@ docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=none \
   -e GIT_CONFIG_COUNT=1 -e GIT_CONFIG_KEY_0=safe.directory -e GIT_CONFIG_VALUE_0=/src \
   ninfer-qualification ctest -L cpu --parallel 4 --output-on-failure
 docker run --rm -w /src ninfer-qualification /usr/local/bin/python3.11 -m pytest -q \
-  tests/artifact tests/convert tests/flash_next tests/bench/ttft tests/test_serve_corpus.py
+  tests/artifact tests/convert tests/flash_next tests/bench/ttft tests/test_serve_corpus.py tests/deploy
 ```
 
 The read-only Git metadata is needed by the hermetic Vast launcher test (`git show HEAD:...`);
 only the known `/src` checkout is marked safe for the container's different UID. Do not mount
 operator settings or credentials. GPU-labelled tests require exclusive access to the card:
 finish user requests, stop NInfer through its supervisor, mount the existing models read-only,
-set `NINFER_TEST_ARTIFACT` to the explicit Qwen artifact and run `ctest -L gpu --parallel 1`.
-Always restore the previous service after qualification, including on test failure. Record skips
-for absent model/graft/S3 prerequisites separately from passed tests.
+and supply the model only to compatible fixtures. The installed dense Qwen3.8 artifact lacks
+MoE expert banks, DFlash v1 and a full Q8/FP8 output head; those real-model checks cannot be
+qualified with this file. Run the two MoE numerical suites on their complete synthetic/FP64 inputs
+without the artifact variable, and record their absent real-bank coverage separately.
+
+```sh
+other_profiles='^ninfer_(qwen3_5_(moe|dflash|dflash_prefill)_real|offloaded_moe_(layer|wide))_test$'
+docker run --rm --gpus all --ulimit memlock=-1:-1 -e OMP_NUM_THREADS=12 \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+  -e NINFER_TEST_ARTIFACT=/models/qwen3_8_27b.ninfer \
+  -v /data/shared/models/ninfer:/models:ro \
+  ninfer-qualification ctest -L gpu --parallel 1 --output-on-failure -E "$other_profiles"
+docker run --rm --gpus all --ulimit memlock=-1:-1 -e OMP_NUM_THREADS=12 \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility -e NINFER_TEST_ARTIFACT= \
+  ninfer-qualification ctest -L gpu --parallel 1 --output-on-failure -R "$other_profiles"
+docker run --rm --gpus all --ulimit memlock=-1:-1 \
+  -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+  -v /data/shared/models/ninfer:/models:ro ninfer-qualification \
+  /src/build-linux/tests/ninfer_tests ninfer_qwen3_5_loading_real_test \
+  --artifact /models/qwen3_8_27b.ninfer --vision --speculative dflash2 --proposal optimized
+```
+
+The loading test needs its explicit `--artifact` argument; the generic environment variable does
+not enable it. Always restore the previous service after qualification, including on test failure.
+Record skips for absent model/graft/S3 prerequisites separately from passed tests. Do not reduce
+numerical tolerances or treat a missing model prerequisite as a passed real-model check.

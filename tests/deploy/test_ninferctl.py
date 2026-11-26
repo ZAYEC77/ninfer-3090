@@ -19,10 +19,11 @@ class DeploymentRecovery(unittest.TestCase):
             root = Path(tmp); state = root/'.local'; verify = state/'verification'; verify.mkdir(parents=True)
             original = 'NINFER_IMAGE=old\nNINFER_CONTEXT=135168\n'
             (root/'.env').write_text(original)
+            (state/'deployment-lock.json').write_text(json.dumps({'runtime_version': 'old-version'}))
             service = {'Image': 'old', 'State': {'Running': running}}
             def command(*args, **kwargs):
                 if args[:3] == ('docker', 'image', 'inspect'):
-                    return json.dumps([{'Id': 'new', 'Config': {'Labels': {'org.opencontainers.image.revision': 'revision'}}}])
+                    return json.dumps([{'Id': 'new', 'Config': {'Labels': {'org.opencontainers.image.revision': 'revision', 'org.opencontainers.image.version': 'new-version'}}}])
                 if args[:3] == ('docker', 'compose', 'create'):
                     service['Image'] = 'new' if 'NINFER_IMAGE=new\n' in (root/'.env').read_text() else 'old'
                 if args[:2] == ('supervisorctl', 'stop'):
@@ -48,12 +49,15 @@ class DeploymentRecovery(unittest.TestCase):
                     self.assertEqual(service['Image'], 'old')
                     self.assertEqual(service['State']['Running'], running)
                     self.assertFalse((verify/'deployment.json').exists())
+                    self.assertEqual(json.loads((state/'deployment-lock.json').read_text())['runtime_version'], 'old-version')
                 else:
                     ctl.deploy('test-image', 'revision')
                     self.assertEqual(service['Image'], 'new')
                     self.assertTrue(service['State']['Running'])
                     self.assertIn('NINFER_CONTEXT=135168\n', (root/'.env').read_text())
-                    self.assertEqual(json.loads((state/'deployment-lock.json').read_text())['image_id'], 'new')
+                    lock = json.loads((state/'deployment-lock.json').read_text())
+                    self.assertEqual(lock['image_id'], 'new')
+                    self.assertEqual(lock['runtime_version'], 'new-version')
             self.assertFalse(list(root.rglob('*before*')))
             self.assertFalse(list(root.rglob('*.bak')))
     def test_success_keeps_unrelated_configuration(self): self.exercise()
