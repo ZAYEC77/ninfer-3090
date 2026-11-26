@@ -16,6 +16,34 @@ No credentials, private server configuration, user conversations, weights or bin
 in Git. Existing model files are reused. Heretic conversion and automatic model switching
 are separate tasks; this deployment still serves the ordinary Qwen3.8-27B.
 
+## Operate the server from one checkout
+
+The server checkout is `/data/projects/ninfer` itself, tracking `release/codex-v0.18.0`.
+`origin` is this fork; operator settings live in ignored `.env`, and current deployment/test
+records in ignored `.local/`. Neither is sent to Docker's build context. `models/` is a link
+to the existing shared model directory; model files are not copied or removed.
+
+```sh
+cd /data/projects/ninfer
+./ninferctl update     # git pull --ff-only, build, protocol tests, switch image, live checks
+./ninferctl rebuild    # build the current local code and switch to it
+./ninferctl restart    # restart the already built image
+./ninferctl status
+```
+
+The operator needs the existing Docker/supervisor permissions, without sudo. Rebuild happens
+while the current model keeps serving. The switch waits for active/queued requests, keeps the
+GPU supervisor as the sole service owner, and restores the previous image in memory if the new
+runtime fails verification. No backup files are created. `start` and `stop` are also available.
+The private `.env` sets `NINFER_IMAGE`, `NINFER_CONTEXT` and `NINFER_BIND_ADDRESS` for the tracked
+root `compose.yaml`. Supervisor's NInfer working directory must point at this checkout.
+The default live check includes the existing user's Codex CLI; set `NINFER_VERIFY_CODEX=0` only
+on installations without that client. Build concurrency defaults to four (`NINFER_BUILD_JOBS`).
+
+`rebuild` accepts tracked local edits and labels them with a diff hash. For a published production
+revision, commit and push the changes first. `update` follows the checkout's own tracking branch;
+it does not automatically switch to upstream development.
+
 ## Build on a Linux Docker host
 
 Check out an exact production commit before building. CUDA 12.8.1, Ubuntu 24.04 and SM86
