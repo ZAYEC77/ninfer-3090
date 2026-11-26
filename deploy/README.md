@@ -97,7 +97,7 @@ not encryption or a signature. No quality or speed improvement is claimed by thi
 
 Build the optional `qualification` target at a recorded source revision. It builds all standalone
 CTest executables as well as the bundle, and uses Python 3.11 with pinned CPU PyTorch, NumPy,
-Jinja2, pytest and safetensors for conversion tests. This adds nothing to the runtime image.
+Jinja2, pytest, safetensors and jsonschema for conversion and schema-oracle tests. This adds nothing to the runtime image.
 
 ```sh
 revision=$(git rev-parse HEAD)
