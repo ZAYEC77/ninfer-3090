@@ -624,25 +624,35 @@ int exercise_startup_deadline(const char* artifact, const fs::path& root, const 
         auto options = with_store(store_engine_options(artifact), directory, std::chrono::seconds(0));
         options.context_store.remote        = bucket;
         options.context_store.restore_budget = kBudget;
+        std::uint64_t finalize_ns = 0;
+        options.startup_observer.callback = [&](const ninfer::StartupEvent& event) {
+            if (event.phase == ninfer::StartupPhase::EngineFinalize &&
+                event.status == ninfer::StartupStatus::Complete) {
+                finalize_ns = event.elapsed_ns;
+            }
+        };
         const auto begun = std::chrono::steady_clock::now();
         ninfer::Engine engine(std::move(options));
         const auto took = std::chrono::steady_clock::now() - begun;
         stats = engine.runtime_stats();
         lists = bucket->lists.load();
+        std::cout << "startup-deadline: listing=" << listing.count() << " ms, calls=" << lists
+                  << ", total=" << std::chrono::duration<double>(took).count()
+                  << " s, finalize=" << static_cast<double>(finalize_ns) / 1e9 << " s\n";
         return took;
     };
     int prompt_lists = 0, slow_lists = 0;
     ninfer::RuntimeStats prompt, slow;
     const auto prompt_start = start(std::chrono::milliseconds(0), prompt_lists, prompt);
-    if (prompt.context_store_restored != 1 || prompt_lists < 1) {
+    if (prompt.context_store_restored != 1 || prompt_lists != 1) {
         std::cerr << "startup-deadline: with a prompt listing the session was not restored: restored="
                   << prompt.context_store_restored << " listings=" << prompt_lists << '\n';
         return 1;
     }
     // A listing that outlasts the whole budget.
     const auto slow_start = start(kBudget + std::chrono::seconds(1), slow_lists, slow);
-    if (slow_lists < 1) {
-        std::cerr << "startup-deadline: the bucket was never listed\n";
+    if (slow_lists != 1) {
+        std::cerr << "startup-deadline: expected one bucket listing, got " << slow_lists << '\n';
         return 1;
     }
     if (slow.context_store_restored != 0) {

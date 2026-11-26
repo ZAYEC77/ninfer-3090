@@ -897,6 +897,9 @@ private:
         store_options.peer_poll       = config.peer_poll;
         store_binding = context_store_binding(options, load);
         store_options.remote        = config.remote;
+        // Engine owns the synchronous, budgeted startup refresh below. A queued background
+        // refresh would race it without that deadline and list the same bucket a second time.
+        store_options.refresh_on_start = false;
         store_options.remote_prefix = config.remote_prefix + remote_binding_scope(store_binding);
         store_options.remote_upload_delay = config.remote_upload_delay;
         store         = std::make_unique<runtime::ContextStore>(std::move(store_options));
