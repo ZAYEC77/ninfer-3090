@@ -316,65 +316,68 @@ int run() {
     }
 
     options.scoring_decode_window = kDecodeWindow;
-    ninfer::Engine engine(options);
-    const auto& effective = engine.options();
-    if (effective.max_concurrency != 1 || effective.prefill_chunk != 1024 ||
-        effective.kv_capacity.mode != ninfer::KvCapacityMode::Explicit ||
-        effective.kv_capacity.explicit_tokens != effective.max_context ||
-        effective.context_cache.enabled ||
-        effective.speculative.backend != ninfer::SpeculativeBackend::None ||
-        effective.kv_cache != ninfer::KvCacheStorage::Fp8E4M3Row256 ||
-        effective.scoring_decode_window != kDecodeWindow) {
-        std::cerr << "causal scoring options were not normalized correctly\n";
-        return 1;
-    }
-
-    const std::vector<ninfer::TokenId> tokens = make_tokens(engine);
-    const std::vector<float> all      = engine.score_tokens(tokens, 1);
-    const std::vector<float> suffix   = engine.score_tokens(tokens, 513);
-    const std::vector<float> repeated = engine.score_tokens(tokens, 513);
-    if (all.size() != 1536 || suffix.size() != 1024 || repeated.size() != suffix.size()) {
-        std::cerr << "causal scoring returned an invalid result shape\n";
-        return 1;
-    }
-    for (const float value : all) {
-        if (!std::isfinite(value) || value > 0.0F) {
-            std::cerr << "causal scoring returned an invalid log probability\n";
-            return 1;
-        }
-    }
-    for (std::size_t i = 0; i < suffix.size(); ++i) {
-        if (!std::isfinite(suffix[i]) || suffix[i] > 0.0F) {
-            std::cerr << "causal scoring returned a non-finite logprob\n";
-            return 1;
-        }
-        if (suffix[i] != repeated[i]) {
-            std::cerr << "a repeated score window inherited prior State/KV\n";
-            return 1;
-        }
-    }
-    if (all != unplanned_all || suffix != unplanned_suffix) {
-        std::cerr << "planning decode scoring changed prefill-phase scores (window 4 vs 0)\n";
-        return 1;
-    }
-
-    // Decode scoring: a 769-token window whose first 512 targets are the prompt half, the last 256
-    // decoded (64 windows of T=4, 86 of T=3 with a one-column tail).
-    const std::vector<ninfer::TokenId> half(tokens.begin(), tokens.begin() + 769);
     constexpr std::uint32_t kFirstTarget = 513;
-    int failures                         = 0;
-    failures += decode_phase_matches_prefill(engine, half, kFirstTarget);
-    failures += decode_windows_agree(engine, half, kFirstTarget);
-    failures += row_sink_sees_every_target(engine, half, kFirstTarget);
-    failures += expect_invalid("a Decode window wider than the planned one", [&] {
-        return engine.score_tokens(half, kFirstTarget, decode(kDecodeWindow + 1), nullptr);
-    });
-    failures += expect_invalid("a row sink with the Prefill phase", [&] {
-        RecordingSink sink;
-        sink.tokens = &half;
-        return engine.score_tokens(half, kFirstTarget, ScoringOptions{}, &sink);
-    });
-    if (failures != 0) { return 1; }
+    std::vector<ninfer::TokenId> half;
+    int failures = 0;
+    {
+        ninfer::Engine engine(options);
+        const auto& effective = engine.options();
+        if (effective.max_concurrency != 1 || effective.prefill_chunk != 1024 ||
+            effective.kv_capacity.mode != ninfer::KvCapacityMode::Explicit ||
+            effective.kv_capacity.explicit_tokens != effective.max_context ||
+            effective.context_cache.enabled ||
+            effective.speculative.backend != ninfer::SpeculativeBackend::None ||
+            effective.kv_cache != ninfer::KvCacheStorage::Fp8E4M3Row256 ||
+            effective.scoring_decode_window != kDecodeWindow) {
+            std::cerr << "causal scoring options were not normalized correctly\n";
+            return 1;
+        }
+
+        const std::vector<ninfer::TokenId> tokens = make_tokens(engine);
+        const std::vector<float> all      = engine.score_tokens(tokens, 1);
+        const std::vector<float> suffix   = engine.score_tokens(tokens, 513);
+        const std::vector<float> repeated = engine.score_tokens(tokens, 513);
+        if (all.size() != 1536 || suffix.size() != 1024 || repeated.size() != suffix.size()) {
+            std::cerr << "causal scoring returned an invalid result shape\n";
+            return 1;
+        }
+        for (const float value : all) {
+            if (!std::isfinite(value) || value > 0.0F) {
+                std::cerr << "causal scoring returned an invalid log probability\n";
+                return 1;
+            }
+        }
+        for (std::size_t i = 0; i < suffix.size(); ++i) {
+            if (!std::isfinite(suffix[i]) || suffix[i] > 0.0F) {
+                std::cerr << "causal scoring returned a non-finite logprob\n";
+                return 1;
+            }
+            if (suffix[i] != repeated[i]) {
+                std::cerr << "a repeated score window inherited prior State/KV\n";
+                return 1;
+            }
+        }
+        if (all != unplanned_all || suffix != unplanned_suffix) {
+            std::cerr << "planning decode scoring changed prefill-phase scores (window 4 vs 0)\n";
+            return 1;
+        }
+
+        // Decode scoring: a 769-token window whose first 512 targets are the prompt half, the last 256
+        // decoded (64 windows of T=4, 86 of T=3 with a one-column tail).
+        half.assign(tokens.begin(), tokens.begin() + 769);
+        failures += decode_phase_matches_prefill(engine, half, kFirstTarget);
+        failures += decode_windows_agree(engine, half, kFirstTarget);
+        failures += row_sink_sees_every_target(engine, half, kFirstTarget);
+        failures += expect_invalid("a Decode window wider than the planned one", [&] {
+            return engine.score_tokens(half, kFirstTarget, decode(kDecodeWindow + 1), nullptr);
+        });
+        failures += expect_invalid("a row sink with the Prefill phase", [&] {
+            RecordingSink sink;
+            sink.tokens = &half;
+            return engine.score_tokens(half, kFirstTarget, ScoringOptions{}, &sink);
+        });
+        if (failures != 0) { return 1; }
+    } // Per-layer cases construct their own Engines; release this model first on a 24 GB card.
     failures += per_layer_cache(options, half, kFirstTarget);
     if (failures != 0) { return 1; }
     std::cout << "OK causal_score_real\n";
