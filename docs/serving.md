@@ -2039,11 +2039,28 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `refusal` | assistant-message replay part; its text enters assistant history |
 | `input_image` | user- or assistant-message part with HTTP(S) or data-URI `image_url`; detail omitted or `auto`; requires server `--vision` |
 | `input_video` | NInfer extension with HTTP(S) or data-URI `video_url`; requires server `--vision` |
-| `reasoning` | raw replay Item with `reasoning_text` content (`content` itself may be omitted); summary/encrypted metadata may accompany raw text but cannot replace it |
+| `reasoning` | raw replay Item with `reasoning_text` content, or this server's `encrypted_content` encoding; a foreign provider's opaque token cannot replace raw text |
 | `function_call` | completed assistant call with optional `id` and namespace, plus required `call_id`, `name`, and JSON-object string `arguments` |
-| `function_call_output` | completed result with required `call_id` and optional matching name/namespace assertion; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
+| `function_call_output` | completed tool result with `call_id` and optional matching name/namespace assertion, or named external app/agent context without `call_id`; `output` may be a string or a non-empty array of `input_text`/`input_image` parts |
 | `custom_tool_call` | completed assistant call of a [custom tool](#custom-tools) with optional `id` and namespace, plus required `call_id`, `name`, and string `input` |
-| `custom_tool_call_output` | as `function_call_output`, for a custom tool's call |
+| `custom_tool_call_output` | result of a custom tool's call; requires `call_id` |
+
+**Codex app and inter-chat context.** A `function_call_output` without `call_id` (also null or an
+empty string) is accepted when it carries a non-empty `name`, with an optional `namespace`.
+These unsolicited context records have no preceding assistant call. This covers selected-page
+metadata and multipart snapshots, inter-chat messages, and other named context sources without a
+tool-name allowlist. String and structured text/image output use the normal content validators.
+`internal_chat_message_metadata_passthrough`, when present, must be an object or null and is
+preserved with the original Item ID, source name/namespace, content, and canonical input order.
+
+The model receives this as user-context data preceded by explicit source attribution. It is not
+an assistant's executed tool result, and its namespace never becomes a system/developer role or a
+grant of permissions. If context arrives between an assistant call and its real results, those
+results are validated and grouped first; the context follows in arrival order. Canonical input
+Items retain their original order for storage and replay. Ordinary user messages do not receive
+this reordering. Unnamed results without call IDs, invalid call ID types, mismatched real tool
+results, and custom results without call IDs remain errors. The same behavior is used by create,
+input-token counting, stored continuation, and full-history stateless replay.
 
 Contiguous assistant-owned Items form one assistant history turn in the representable order
 `reasoning` -> assistant message content -> `function_call`/`custom_tool_call`. Multiple message
@@ -2066,8 +2083,8 @@ An `input_text`, `input_image`, or tool-result part may carry
 identity or output semantics. String message status/phase metadata is accepted but has no Qwen
 prompt representation.
 
-`input_file`, `input_audio`, image `file_id`, non-`auto` image detail, reasoning metadata without raw
-reasoning text, partial tool Items, and other Item/content types are not supported. HTTP media URLs
+`input_file`, `input_audio`, image `file_id`, non-`auto` image detail, foreign reasoning metadata
+without raw reasoning text, partial tool Items, and other Item/content types are not supported. HTTP media URLs
 stored in a response chain are fetched again when that chain is continued; use data URIs when the
 historical media bytes must be immutable.
 
@@ -2277,7 +2294,7 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 ```
 
 Unsupported Create fields include Conversations, prompt templates, context management,
-`access_programs`, hosted moderation, non-empty `include`, background execution, compaction,
+`access_programs`, hosted moderation, unsupported `include` values, background execution, compaction,
 files/audio, and OpenAI-hosted/MCP tools. These are compatibility boundaries, not silently
 accepted placeholders.
 

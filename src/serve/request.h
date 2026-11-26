@@ -120,6 +120,9 @@ struct ChatTurn {
     // verified against ToolCall::custom of the call identified by tool_call_id. Unset when the
     // protocol has no such distinction.
     std::optional<bool> tool_result_custom;
+    // An unsolicited named Responses context item, not an answer to an assistant tool call.
+    // Call-graph normalization keeps these after an in-flight call's ordinary result group.
+    bool external_context = false;
     bool tool_result_is_error = false;
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)

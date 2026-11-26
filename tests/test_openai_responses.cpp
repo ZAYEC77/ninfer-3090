@@ -1568,6 +1568,127 @@ int test_reasoning_summary_options() {
     return failures;
 }
 
+int test_named_external_context() {
+    const Json external = {
+        {"type", "function_call_output"}, {"id", "fco_context"},
+        {"name", "future_context_source"}, {"namespace", "another_agent"},
+        {"output", "<source_thread_id>peer</source_thread_id>\nПривіт, колеги!"},
+        {"internal_chat_message_metadata_passthrough", {{"turn_id", "turn-context"}}}};
+    const auto body_for = [](const Json& item) {
+        return Json{{"model", "m"}, {"instructions", "trusted instructions"},
+                    {"input", Json::array({Json{{"role", "user"}, {"content", "before"}},
+                                           item,
+                                           Json{{"role", "user"}, {"content", "after"}}})}};
+    };
+    int failures = 0;
+    std::vector<Json> contexts = {external};
+    Json page = external;
+    page["name"] = "codex_apps_open_page";
+    page["namespace"] = "agent";
+    page["output"] = R"({"page_id":null})";
+    contexts.push_back(page);
+    page["name"] = "codex_apps_selected_page_part_1_of_1";
+    page["output"] = "Companion Page snapshot part 1 of 1:\n{\"page_id\":null}";
+    contexts.push_back(page);
+    Json delegated = external;
+    delegated["namespace"] = "codex_app";
+    delegated["name"] = "send_message_to_thread";
+    delegated["output"] = "<codex_delegation>original peer text</codex_delegation>";
+    contexts.push_back(delegated);
+    Json no_namespace = external;
+    no_namespace.erase("namespace");
+    contexts.push_back(no_namespace);
+    for (const Json& item : contexts) {
+        for (const Json& call_id : {Json(), Json("")}) {
+            Json value = item;
+            value["call_id"] = call_id;
+            const auto request = parse_openai_responses_create_request(body_for(value), limits());
+            const ChatTurn& context = request.prompt.input_turns.at(1);
+            failures += check(context.role == ninfer::ChatRole::User && context.external_context &&
+                                  context.tool_call_id.empty() && !context.tool_result_name &&
+                                  request.tool_identities.empty(),
+                              "named external context became an executed tool or lost its role");
+            failures += check(context.content.at(0).text.find(item.at("name").get<std::string>()) !=
+                                      std::string::npos &&
+                                  context.content.back().text == item.at("output").get<std::string>(),
+                              "external source attribution or original UTF-8 text changed");
+            const Json& canonical = request.prompt.input_items.at(1);
+            failures += check(canonical.at("id") == item.at("id") &&
+                                  canonical.at("type") == "function_call_output" &&
+                                  canonical.at("name") == item.at("name") &&
+                                  canonical.at("output") == item.at("output") &&
+                                  canonical.at("internal_chat_message_metadata_passthrough") ==
+                                      item.at("internal_chat_message_metadata_passthrough"),
+                              "external context canonical replay lost source or metadata");
+            OpenAIResponsesStore store(8, 1ULL << 20);
+            const auto resolved = resolve_openai_responses_prompt(request.prompt, store, "resp", true);
+            failures += check(resolved.generation.messages.size() == 4 &&
+                                  resolved.generation.messages[0].role == ninfer::ChatRole::Developer &&
+                                  resolved.generation.messages[2].role == ninfer::ChatRole::User,
+                              "external context changed instruction authority or message order");
+            const auto counted = parse_openai_responses_input_tokens_request(body_for(value), limits());
+            failures += check(counted.input_turns.at(1).content.back().text == context.content.back().text,
+                              "input token counting uses different external context semantics");
+        }
+    }
+    // The ordinary missing-call-id spelling, and structured tool-result content, work too.
+    Json media = external;
+    media["output"] = Json::array({Json{{"type", "input_text"}, {"text", "original text"}},
+                                  Json{{"type", "input_image"},
+                                       {"image_url", "data:image/png;base64,AAAA"}}});
+    const auto media_request = parse_openai_responses_create_request(body_for(media), limits());
+    failures += check(media_request.prompt.input_turns.at(1).content.size() == 3 &&
+                          media_request.prompt.input_turns.at(1).content.back().kind == ContentKind::Image &&
+                          media_request.prompt.input_items.at(1).at("output") == media.at("output"),
+                      "structured external context or its image source was dropped");
+
+    // Context may arrive while an assistant tool group is executing. Its wire order is retained,
+    // while the Engine receives the complete real tool-result group before external user data.
+    Json interleaved = {{"model", "m"}, {"input", Json::array({
+        Json{{"role", "user"}, {"content", "start"}},
+        Json{{"type", "function_call"}, {"name", "lookup"}, {"call_id", "call_real"}, {"arguments", "{}"}},
+        external,
+        Json{{"type", "function_call_output"}, {"call_id", "call_real"}, {"output", "result"}},
+        Json{{"role", "user"}, {"content", "continue"}}})}};
+    auto request = parse_openai_responses_create_request(interleaved, limits());
+    OpenAIResponsesStore store(8, 1ULL << 20);
+    auto resolved = resolve_openai_responses_prompt(request.prompt, store, "resp", true);
+    failures += check(resolved.generation.messages.size() == 5 &&
+                          resolved.generation.messages[2].role == ninfer::ChatRole::Tool &&
+                          resolved.generation.messages[3].external_context &&
+                          request.prompt.input_items[2].at("id") == "fco_context",
+                      "interleaved external context broke a real tool result or wire ordering");
+    auto parent = stored_parent(append_openai_response_context({}, {text_turn(ninfer::ChatRole::User, "past")}));
+    store.put(std::move(parent));
+    auto continuation = body_for(external);
+    continuation["previous_response_id"] = "resp_parent";
+    auto continued = parse_openai_responses_create_request(continuation, limits());
+    auto combined = resolve_openai_responses_prompt(continued.prompt, store, "resp_next", true);
+    failures += check(combined.generation.messages.size() == 5 &&
+                          combined.generation.messages[3].external_context,
+                      "previous_response_id lost named external context");
+
+    for (const auto& mutate : std::vector<std::function<void(Json&)>>{
+             [](Json& v) { v.erase("name"); },
+             [](Json& v) { v["name"] = ""; },
+             [](Json& v) { v["call_id"] = 1; },
+             [](Json& v) { v["namespace"] = Json::array(); },
+             [](Json& v) { v["status"] = "in_progress"; },
+             [](Json& v) { v["output"] = Json::array(); },
+             [](Json& v) { v["internal_chat_message_metadata_passthrough"] = "not an object"; },
+             [](Json& v) { v["type"] = "custom_tool_call_output"; },
+             [](Json& v) { v["call_id"] = "nonexistent"; }}) {
+        Json invalid = external;
+        mutate(invalid);
+        failures += check(api_error([&] {
+                              const auto parsed = parse_openai_responses_create_request(body_for(invalid), limits());
+                              (void)resolve_openai_responses_prompt(parsed.prompt, store, "bad", false);
+                          }).status == 400,
+                          "external context relaxed malformed or mismatched real tool history");
+    }
+    return failures;
+}
+
 // Codex and the Agents SDK send include=["reasoning.encrypted_content"] on every request that
 // has reasoning on, so the server must honour it rather than answer 400 include_not_supported.
 int test_include_reasoning_encrypted_content() {
@@ -2129,6 +2250,7 @@ int main() {
     failures += test_response_object();
     failures += test_output_text_logprobs();
     failures += test_include_reasoning_encrypted_content();
+    failures += test_named_external_context();
     failures += test_sse_sequence_and_failures();
     failures += test_input_tokens_uses_shared_state_path();
     if (failures == 0) { std::cout << "ok\n"; }

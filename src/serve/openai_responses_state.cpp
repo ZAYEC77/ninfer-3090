@@ -80,9 +80,16 @@ std::vector<ChatTurn> normalize_call_graph(std::vector<ChatTurn> turns) {
         normalized.push_back(std::move(turn));
 
         std::vector<std::optional<ChatTurn>> results(positions.size());
+        std::vector<ChatTurn> external_context;
         std::size_t result_count = 0;
         std::size_t cursor       = index + 1;
-        while (cursor < turns.size() && turns[cursor].role == ChatRole::Tool) {
+        while (cursor < turns.size() &&
+               (turns[cursor].role == ChatRole::Tool || turns[cursor].external_context)) {
+            if (turns[cursor].external_context) {
+                external_context.push_back(std::move(turns[cursor]));
+                ++cursor;
+                continue;
+            }
             ChatTurn& result    = turns[cursor];
             const auto position = positions.find(result.tool_call_id);
             if (position == positions.end()) {
@@ -132,6 +139,7 @@ std::vector<ChatTurn> normalize_call_graph(std::vector<ChatTurn> turns) {
         for (std::size_t result_index = 0; result_index < result_count; ++result_index) {
             normalized.push_back(std::move(*results[result_index]));
         }
+        for (ChatTurn& context : external_context) { normalized.push_back(std::move(context)); }
         index = cursor;
     }
     return normalized;
