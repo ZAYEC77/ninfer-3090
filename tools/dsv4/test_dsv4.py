@@ -138,11 +138,13 @@ def test_engram_row_addressing():
 def test_golden_fixture_is_deterministic_and_self_consistent():
     a, b = ref.golden(), ref.golden()
     check(a == b, "same seed, same fixture")
-    w = {k: ref.dequant_fp4(np.array(a[k]["packed"], np.uint8), np.array(a[k]["scale"], np.uint8)) for k in ("w1", "w2", "w3")}
-    x, route = np.array(a["x"], np.float32), np.array(a["route_weight"], np.float32)
+    w = {k: ref.dequant_fp4(np.array(a[k]["packed"], np.uint8), np.array(a[k]["scale"], np.uint8)).astype(np.float64)
+         for k in ("w1", "w2", "w3")}
+    x, route = np.array(a["x"], np.float64), np.array(a["route_weight"], np.float64)
+    # Independently compare vectorized matmul/tanh with the fixture's scalar fsum/exp oracle.
     again = ref.expert_forward(x, w["w1"], w["w2"], w["w3"], a["swiglu_limit"], route)
-    check(np.allclose(again, a["expert_out"]), "expert_out reproduces")
-    check(np.allclose(np.array(a["expert_out"]), route * np.array(a["expert_out_unweighted"]), rtol=1e-4, atol=1e-6),
+    check(np.allclose(again, a["expert_out"], rtol=1e-12, atol=1e-10), "FP64 expert_out reproduces")
+    check(np.allclose(np.array(a["expert_out"]), route * np.array(a["expert_out_unweighted"]), rtol=1e-12, atol=1e-10),
           "routing weight scales linearly through the down projection")
 
 

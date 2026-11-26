@@ -11,7 +11,8 @@ PyTorch reference) without needing PyTorch, a GPU or the weights:
   * `engram_row`     where a hashed row lives in the table and how it dequantises.
 
 `--emit-golden` writes a small deterministic fixture (packed bytes in, outputs out) that a C++ or CUDA
-kernel test can load and compare against, so the first GPU run starts from known-good vectors.
+kernel test can load and compare against. Expert expected values use a scalar FP64 oracle over
+the represented FP32 inputs, so cancellation does not make the fixture depend on a BLAS build.
 
     python tools/dsv4/reference.py --emit-golden tests/fixtures/dsv4/golden.json
 """
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -137,6 +139,28 @@ def engram_row_offsets(index: int, dim: int) -> tuple[int, int]:
     return index * dim, index * (dim // FP8_BLOCK)
 
 
+def _expert_oracle(x, w1, w2, w3, swiglu_limit, weights=None) -> np.ndarray:
+    """Scalar FP64 mathematics for fixture expectations; no BLAS or FP32 reduction order."""
+    xs, gate_rows, down_rows, up_rows = (a.astype(np.float64).tolist() for a in (x, w1, w2, w3))
+    routes = weights.astype(np.float64).tolist() if weights is not None else None
+    out = []
+    for t, row in enumerate(xs):
+        hidden = []
+        for gate_row, up_row in zip(gate_rows, up_rows):
+            gate = math.fsum(a * b for a, b in zip(row, gate_row))
+            up = math.fsum(a * b for a, b in zip(row, up_row))
+            if swiglu_limit > 0:
+                gate = min(gate, swiglu_limit)
+                up = max(-swiglu_limit, min(up, swiglu_limit))
+            # Stable sigmoid, independent of the vectorized tanh used by expert_forward.
+            e = math.exp(-abs(gate))
+            sigmoid = 1.0 / (1.0 + e) if gate >= 0 else e / (1.0 + e)
+            value = gate * sigmoid * up
+            hidden.append(value * routes[t][0] if routes is not None else value)
+        out.append([math.fsum(a * b for a, b in zip(hidden, down)) for down in down_rows])
+    return np.array(out, dtype=np.float64)
+
+
 def golden(seed: int = 7, dim: int = 64, inter: int = 32, n_tokens: int = 3, n_experts: int = 8, topk: int = 3) -> dict:
     """A deterministic, self-describing fixture for kernel tests."""
     rng = np.random.default_rng(seed)
@@ -164,8 +188,8 @@ def golden(seed: int = 7, dim: int = 64, inter: int = 32, n_tokens: int = 3, n_e
         "w2": {"packed": p2.tolist(), "scale": s2.tolist()},
         "x": x.tolist(),
         "route_weight": route.tolist(),
-        "expert_out": expert_forward(x, w1, w2, w3, 10.0, route).tolist(),
-        "expert_out_unweighted": expert_forward(x, w1, w2, w3, 10.0).tolist(),
+        "expert_out": _expert_oracle(x, w1, w2, w3, 10.0, route).tolist(),
+        "expert_out_unweighted": _expert_oracle(x, w1, w2, w3, 10.0).tolist(),
         "gate": {
             "weight": gw.tolist(),
             "bias": gb.tolist(),
