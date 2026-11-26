@@ -34,7 +34,7 @@ venv/
 !artifacts/grafts/*.bin
 *.ninfer
 *.ninfer.conversion.json
-/models/
+/models
 out/
 vcpkg_installed/
 
