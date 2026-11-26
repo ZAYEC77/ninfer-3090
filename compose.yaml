@@ -1,0 +1,84 @@
+name: ninfer-3090
+services:
+  ninfer:
+    image: ${NINFER_IMAGE:?Set the verified local image ID in .env}
+    pull_policy: never
+    gpus: all
+    init: true
+    restart: "no"  # managed by supervisord (gpu-supervisor)
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m,mode=1777
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:18084:8080"
+      - "${NINFER_BIND_ADDRESS:-127.0.0.1}:18082:8080"
+    volumes:
+      - type: bind
+        source: /data/shared/models/ninfer
+        target: /models
+        read_only: true
+        bind:
+          create_host_path: false
+    command:
+      - ninfer-serve
+      - /models/qwen3_8_27b.ninfer
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --max-context
+      - "${NINFER_CONTEXT:-65536}"
+      - --kv-capacity
+      - "${NINFER_CONTEXT:-65536}"
+      - --max-concurrency
+      - "1"
+      - --max-pending-requests
+      - "16"
+      - --pending-timeout-ms
+      - "600000"
+      - --prefill-cublas
+      - --prefill-chunk
+      - "2048"
+      - --kv-dtype
+      - rk4v4
+      - --gdn-state-fp16
+      - --spec
+      - dflash2
+      - --draft-tokens
+      - "7"
+      - --lm-head-draft
+      - --ngram-draft-tokens
+      - "15"
+      - --vision
+      - --vision-residency
+      - overlay
+      - --host-context-mib
+      - "2048"
+    networks:
+      ai:
+        aliases: [ninfer-backend]
+    healthcheck:
+      test: [CMD, curl, -fsS, --max-time, "5", http://127.0.0.1:8080/health]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "3"
+
+networks:
+  ai:
+    external: true
+    name: aiml_egress

@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+"""Build and operate this checkout through the existing GPU supervisor."""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+ROOT = Path(__file__).resolve().parent
+STATE = ROOT / '.local'
+VERIFY = STATE / 'verification'
+BASE = os.environ.get('NINFER_CONTROL_URL', 'http://127.0.0.1:18084').rstrip('/')
+PROGRAM = os.environ.get('NINFER_SUPERVISOR_PROGRAM', 'gpu:ninfer')
+CONTAINER = os.environ.get('NINFER_CONTAINER', 'ninfer-3090-ninfer-1')
+DEVEL = 'nvidia/cuda@sha256:520292dbb4f755fd360766059e62956e9379485d9e073bbd2f6e3c20c270ed66'
+RUNTIME = 'nvidia/cuda@sha256:ebef3c171eeef0298e4eb2e4be843105edf3b8b0ac45e0b43acee358e8046867'
+
+
+def run(*args, capture=False, timeout=None):
+    result = subprocess.run(args, cwd=ROOT, check=True, text=True,
+                            stdout=subprocess.PIPE if capture else None,
+                            stderr=subprocess.STDOUT if capture else None, timeout=timeout)
+    return result.stdout.strip() if capture else ''
+
+
+def api(path):
+    with urllib.request.urlopen(BASE + path, timeout=5) as response:
+        return json.load(response)
+
+
+def image():
+    return json.loads(run('docker', 'inspect', CONTAINER, capture=True))[0]
+
+
+def wait_idle():
+    if not image()['State']['Running']:
+        return
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        slots = api('/slots')
+        with urllib.request.urlopen(BASE + '/metrics', timeout=5) as response:
+            metrics = response.read().decode()
+        values = re.findall(r'^llamacpp:requests_(?:processing|deferred)\s+(\S+)', metrics, re.M)
+        if len(values) >= 2 and all(float(v) == 0 for v in values) and all(not s['is_processing'] for s in slots):
+            return
+        time.sleep(2)
+    raise RuntimeError('Active requests did not finish; the service was left running')
+
+
+def wait_ready():
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        try:
+            if api('/health').get('status') == 'ok':
+                return
+        except (OSError, ValueError):
+            pass
+        time.sleep(2)
+    raise RuntimeError('NInfer did not become healthy within 180 seconds')
+
+
+def verify():
+    run(sys.executable, str(ROOT/'deploy/verify_native.py'), '--base-url', BASE,
+        '--output', str(VERIFY/'native.json'), timeout=300)
+    native = json.loads((VERIFY/'native.json').read_text())['results']
+    assert len(native) == 10 and all(v['status'] == 'passed' for v in native)
+    checks = None
+    if os.environ.get('NINFER_VERIFY_CODEX', '1') != '0':
+        output = run(sys.executable, str(ROOT/'deploy/verify_codex.py'), capture=True, timeout=300)
+        checks = json.loads(output.splitlines()[-1])
+        assert len(checks) == 6 and all(checks.values()), checks
+        print('Codex shell/apply_patch: passed', flush=True)
+    return checks
+
+
+def deploy(tag, revision):
+    env = ROOT/'.env'
+    old_env = env.read_text()
+    assert len(re.findall(r'^NINFER_IMAGE=.*$', old_env, re.M)) == 1, 'Expected one NINFER_IMAGE in .env'
+    details = json.loads(run('docker', 'image', 'inspect', tag, capture=True))[0]
+    assert details['Config']['Labels']['org.opencontainers.image.revision'] == revision
+    current = image()
+    previous = current['Image']
+    was_running = current['State']['Running']
+    new_env = re.sub(r'^NINFER_IMAGE=.*$', 'NINFER_IMAGE=' + details['Id'], old_env, flags=re.M)
+    wait_idle()
+    assert env.read_text() == old_env, '.env changed during build; inspect before retrying'
+    print('Requests finished; switching image', flush=True)
+    if was_running:
+        run('supervisorctl', 'stop', PROGRAM)
+    try:
+        env.write_text(new_env)
+        run('supervisorctl', 'start', PROGRAM)
+        wait_ready()
+        assert image()['Image'] == details['Id'], 'Supervisor started a different image'
+        checks = verify()
+    except BaseException:
+        subprocess.run(['supervisorctl', 'stop', PROGRAM], cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env.write_text(old_env)
+        if was_running:
+            run('supervisorctl', 'start', PROGRAM)
+            wait_ready()
+        else:
+            run('docker', 'compose', 'create', '--no-build', 'ninfer')
+        print('Previous image restored; no backup files created', file=sys.stderr, flush=True)
+        raise
+    report = {'source_repo': 'https://github.com/ZAYEC77/ninfer-3090', 'source_commit': revision,
+              'image_id': details['Id'], 'image_tag': tag, 'previous_image_id': previous,
+              'deployed_at': datetime.now(timezone.utc).isoformat(), 'protocol_suites': 4,
+              'native_scenarios': 10, 'codex_checks': checks}
+    (VERIFY/'deployment.json').write_text(json.dumps(report, indent=2) + '\n')
+    lock_path = STATE/'deployment-lock.json'
+    lock = json.loads(lock_path.read_text()) if lock_path.exists() else {}
+    lock.update(report)
+    lock.update({'source_path': str(ROOT), 'source_branch': run('git', 'branch', '--show-current', capture=True),
+                 'base_image': RUNTIME, 'cuda_devel_image': DEVEL,
+                 'runtime_inference_verified': True, 'last_validation': {'status': 'passed', 'report': str(VERIFY/'deployment.json')}})
+    lock_path.write_text(json.dumps(lock, indent=2) + '\n')
+    print(json.dumps(report), flush=True)
+
+
+def rebuild():
+    revision = run('git', 'rev-parse', 'HEAD', capture=True)
+    diff = run('git', 'diff', 'HEAD', capture=True)
+    if diff:
+        revision += '-dirty-' + hashlib.sha256(diff.encode()).hexdigest()[:10]
+    token = revision[:12] + (revision[40:] if len(revision) > 40 else '')
+    args = ['docker', 'build', '-f', 'deploy/Dockerfile', '--build-arg', 'CUDA_DEVEL_IMAGE=' + DEVEL,
+            '--build-arg', 'CUDA_RUNTIME_IMAGE=' + RUNTIME, '--build-arg', 'BUILD_JOBS=' + os.environ.get('NINFER_BUILD_JOBS', '4')]
+    test_tag = 'local/ninfer-tests:' + token
+    tag = 'local/ninfer:' + token
+    run(*args, '--target', 'protocol-tests', '-t', test_tag, '.')
+    tests = run('docker', 'run', '--rm', '--runtime=nvidia', '-e', 'NVIDIA_VISIBLE_DEVICES=none',
+                '-e', 'NVIDIA_DRIVER_CAPABILITIES=compute,utility', test_tag, capture=True, timeout=180)
+    print(tests, flush=True)
+    assert '0 tests failed out of 4' in tests, 'The four expected protocol suites did not run'
+    (VERIFY/'protocol-tests.json').write_text(json.dumps({'source_commit': revision, 'tests': 4, 'passed': True}) + '\n')
+    run(*args, '--target', 'runtime', '--build-arg', 'SOURCE_REVISION=' + revision, '-t', tag, '.')
+    # Catch edits made while Docker was compiling; do not label a mixed checkout as this revision.
+    final = run('git', 'rev-parse', 'HEAD', capture=True)
+    current_diff = run('git', 'diff', 'HEAD', capture=True)
+    if current_diff:
+        final += '-dirty-' + hashlib.sha256(current_diff.encode()).hexdigest()[:10]
+    assert final == revision, 'Source changed during build; service was left unchanged'
+    deploy(tag, revision)
+    subprocess.run(['docker', 'image', 'rm', test_tag], cwd=ROOT, check=False)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=['update', 'rebuild', 'restart', 'start', 'stop', 'status'])
+    args = parser.parse_args()
+    if args.command == 'status':
+        subprocess.run(['supervisorctl', 'status', PROGRAM], cwd=ROOT)
+        print('Checkout:', run('git', 'rev-parse', '--short=12', 'HEAD', capture=True))
+        if (VERIFY/'deployment.json').exists(): print((VERIFY/'deployment.json').read_text())
+        return
+    VERIFY.mkdir(parents=True, exist_ok=True)
+    if args.command == 'update':
+        run('git', 'pull', '--ff-only')
+        os.execv(sys.executable, [sys.executable, str(ROOT/'ninferctl'), 'rebuild'])
+    elif args.command == 'rebuild':
+        rebuild()
+    elif args.command == 'start':
+        run('supervisorctl', 'start', PROGRAM)
+        wait_ready()
+    elif args.command == 'stop':
+        wait_idle()
+        run('supervisorctl', 'stop', PROGRAM)
+    elif args.command == 'restart':
+        wait_idle()
+        run('supervisorctl', 'stop', PROGRAM)
+        run('supervisorctl', 'start', PROGRAM)
+        wait_ready()
+
+
+if __name__ == '__main__':
+    main()
