@@ -234,6 +234,45 @@ int test_budgets_and_nonsemantic_hints() {
     return failures;
 }
 
+int test_image_detail_compatibility() {
+    int failures = 0;
+    const Json image{{"type", "input_image"}, {"image_url", "data:image/png;base64,AA=="}};
+    auto body_for = [](const Json& part) {
+        return Json{{"model", "m"},
+                    {"input", Json::array({Json{{"role", "user"},
+                                                {"content", Json::array({part})}}})}};
+    };
+    for (const auto& detail : {Json("auto"), Json("low"), Json("high"), Json("original"),
+                               Json(nullptr)}) {
+        auto part = image;
+        part["detail"] = detail;
+        const auto body = body_for(part);
+        const auto parsed = parse_openai_responses_create_request(body, limits());
+        failures += check(parsed.prompt.input_turns.at(0).content.at(0).kind == ContentKind::Image &&
+                              parsed.prompt.input_items.at(0).at("content").at(0).at("detail") ==
+                                  "auto",
+                          "recognized image detail uses native image preprocessing");
+        const auto counted = parse_openai_responses_input_tokens_request(body, limits());
+        failures += check(counted.input_turns.at(0).content.at(0).kind == ContentKind::Image,
+                          "image detail accepted by input token counting");
+    }
+    failures += check(parse_openai_responses_create_request(body_for(image), limits())
+                              .prompt.input_turns.at(0).content.at(0).kind == ContentKind::Image,
+                      "omitted image detail accepted");
+    auto invalid = image;
+    invalid["detail"] = "unknown";
+    failures += check(api_code([&] {
+                          (void)parse_openai_responses_create_request(body_for(invalid), limits());
+                      }) == "image_detail_not_supported",
+                      "unknown image detail rejected");
+    invalid["detail"] = 42;
+    failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(body_for(invalid), limits());
+                      }).status == 400,
+                      "non-string image detail rejected");
+    return failures;
+}
+
 int test_typed_items_and_cache_markers() {
     const Json body = {
         {"model", "m"},
@@ -258,7 +297,7 @@ int test_typed_items_and_cache_markers() {
                                       {"prompt_cache_breakpoint", Json{{"mode", "explicit"}}}},
                                  Json{{"type", "input_image"},
                                       {"image_url", "data:image/png;base64,AA=="},
-                                      {"detail", "auto"}}})}},
+                                      {"detail", "original"}}})}},
               Json{{"id", "msg_refusal"},
                    {"type", "message"},
                    {"role", "assistant"},
@@ -2235,6 +2274,7 @@ int main() {
     failures += test_constrained_decoding();
     failures += test_basic_request_and_resolution();
     failures += test_budgets_and_nonsemantic_hints();
+    failures += test_image_detail_compatibility();
     failures += test_typed_items_and_cache_markers();
     failures += test_prompt_cache_policy_after_history_resolution();
     failures += test_contiguous_assistant_items();
